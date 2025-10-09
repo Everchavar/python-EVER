@@ -1,6 +1,5 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash, make_response
 from flask_mysqldb import MySQL
-from flask_bcrypt import Bcrypt
 
 app = Flask(__name__)
 app.secret_key = 'tu_clave_secreta'
@@ -12,7 +11,6 @@ app.config['MYSQL_PASSWORD'] = ''
 app.config['MYSQL_DB'] = 'flask_login'
 
 mysql = MySQL(app)
-bcrypt = Bcrypt(app)
 
 # Función para agregar cabeceras de no caché
 def add_no_cache_headers(response):
@@ -31,57 +29,27 @@ def index():
 def login():
     if request.method == 'POST':
         username = request.form['username']
-        password = request.form['password']
+        # La contraseña no es necesaria para este bypass, pero la capturamos
+        password = request.form['password'] 
 
-        # ----------------------------------------------------------------------
-        # !!! INICIO DE LA VULNERABILIDAD SQL INTENCIONAL !!!
-        # ----------------------------------------------------------------------
-        
-        # 1. Obtenemos el cursor
         cur = mysql.connection.cursor()
-        
-        # 2. CONSTRUCCIÓN VULNERABLE DE LA CONSULTA usando f-string.
-        #    Esto permite que el código SQL inyectado se ejecute.
-        #    NOTAR que se debe encerrar la variable en comillas simples en el SQL:
-        sql_vulnerable = f"SELECT * FROM users WHERE username = '{username}'"
 
-        # 3. Ejecutamos la consulta. Aquí, la inyección es posible.
+        # ESTE ES EL PUNTO VULNERABLE DE INYECCIÓN SQL CLÁSICA (Punto 1 del Lab)
+        # Se construye la consulta pegando el string del usuario directamente.
+        sql_vulnerable = f"SELECT id, username, password FROM users WHERE username = '{username}'"
+        
+        # Ejecutamos la consulta INSEGURA
         cur.execute(sql_vulnerable)
-        
-        # ----------------------------------------------------------------------
-        # !!! FIN DE LA VULNERABILIDAD SQL INTENCIONAL !!!
-        # ----------------------------------------------------------------------
-        
         user = cur.fetchone()
         cur.close()
 
-        # Si encontramos un usuario (gracias a la inyección o credenciales válidas)
-        if user:
-            # NOTA: En la inyección, 'user' será el primer usuario de la DB.
-            # La verificación de la contraseña aún se hace contra el hash de ese usuario.
-
-            # Si el atacante usa una inyección que omite la contraseña (clásica):
-            # En este escenario, si el atacante ingresa: ' OR '1'='1
-            # La consulta devuelve el primer usuario, PERO luego verifica la contraseña 
-            # de ese usuario (user[2]) contra el 'password' ingresado.
-            
-            # Para una demostración de bypass MÁS SIMPLE, eliminemos la verificación 
-            # de contraseña si la consulta vulnerable devuelve un usuario:
-            
-            # ELIMINANDO la verificación de contraseña para DEMOSTRACIÓN FÁCIL:
-            # if user and bcrypt.check_password_hash(user[2], password): 
-            
-            # Reemplazamos por un simple if user (lo que la inyección hace):
-            
-            # Si el objetivo es solo demostrar el BYPASS, puedes simplificar la lógica
-            # para que cualquier cosa que devuelva la consulta vulnerable te dé acceso.
-            
-            # Opción 1 (Inyección Bypass Total):
-            session['username'] = user[1] # user[1] es el username
+        # Si la inyección fue exitosa (el SELECT devolvió un usuario)
+        if user: 
+            # Damos acceso directo sin verificar la contraseña hasheada (para la demo)
+            session['username'] = user[1] 
             return redirect(url_for('home'))
-
         else:
-            flash('Usuario o contraseña incorrectos (SQLi Proof)')
+            flash('Usuario o contraseña incorrectos')
             return redirect(url_for('login'))
 
     response = make_response(render_template('login.html'))
@@ -92,10 +60,10 @@ def register():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
-        hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
 
         cur = mysql.connection.cursor()
-        cur.execute('INSERT INTO users (username, password) VALUES (%s, %s)', (username, hashed_password))
+        # Guardamos la contraseña en texto plano (SIN ENCRIPTACIÓN)
+        cur.execute('INSERT INTO users (username, password) VALUES (%s, %s)', (username, password))
         mysql.connection.commit()
         cur.close()
 
@@ -111,6 +79,38 @@ def home():
         return redirect(url_for('login'))    # Redirige a login si no está autenticado
     response = make_response(render_template('home.html'))
     return add_no_cache_headers(response)    # Aplica las cabeceras de no caché
+
+# ----------------------------------------------------------------------
+# INYECCIÓN SQL EN URL CON UNION (Punto 2 del Lab)
+# ----------------------------------------------------------------------
+@app.route('/plato_detalle')
+def plato_detalle():
+    # Obtiene el ID del plato desde el parámetro 'id' en la URL
+    plato_id = request.args.get('id', '1')
+
+    cur = mysql.connection.cursor()
+
+    # ESTE ES EL PUNTO VULNERABLE: Construcción de consulta con f-string
+    # La consulta espera un ID, pero puede recibir código SQL malicioso.
+    try:
+        sql_vulnerable_union = f"SELECT id, nombre, descripcion FROM menu WHERE id = {plato_id}"
+        cur.execute(sql_vulnerable_union)
+        
+        # user[0] = id, user[1] = nombre, user[2] = descripcion
+        plato = cur.fetchone() 
+    except Exception as e:
+        # Si la consulta falla (por un error de inyección), enviamos un mensaje.
+        plato = (0, "ERROR DE SINTAXIS O COLUMNAS (Prueba con otro número de columnas)", str(e))
+        print(f"Error de base de datos durante la inyección: {e}")
+    finally:
+        cur.close()
+
+    if plato:
+        response = make_response(render_template('detalle_vulnerable.html', plato=plato))
+    else:
+        response = make_response(render_template('detalle_vulnerable.html', plato=(0, "Plato no encontrado", "Intenta con otro ID.")))
+        
+    return add_no_cache_headers(response)
 
 @app.route('/logout')
 def logout():
